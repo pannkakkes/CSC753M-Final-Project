@@ -315,11 +315,19 @@ def main():
     pd.DataFrame(binary_results).to_csv(RESULTS_DIR / "cross_attention_per_class.csv", index=False)
     timer.to_df().to_csv(RESULTS_DIR / "cross_attention_timing.csv", index=False)
 
+    pred_rows = []
     for model_name, data in pooled_predictions.items():
         print(f"\n{model_name} — pooled classification report (all 5 folds):")
         print(classification_report(data["y_true"], data["y_pred"], target_names=le.classes_))
+        for yt, yp in zip(data["y_true"], data["y_pred"]):
+            pred_rows.append({"model": model_name, "y_true": int(yt), "y_pred": int(yp)})
+    pd.DataFrame(pred_rows).to_csv(RESULTS_DIR / "cross_attention_pooled_predictions.csv", index=False)
+
+    with open(RESULTS_DIR / "label_classes.json", "w") as f:
+        json.dump(list(le.classes_), f)
 
     print(f"\nSaved: {RESULTS_DIR / 'cross_attention_results.csv'}")
+    print(f"Saved: {RESULTS_DIR / 'cross_attention_pooled_predictions.csv'}")
     print(f"Saved: {RESULTS_DIR / 'cross_attention_per_class.csv'}")
     print(f"Saved: {RESULTS_DIR / 'cross_attention_timing.csv'}")
     print(f"Saved per-fold checkpoints to: {CKPT_DIR}/")
