@@ -494,22 +494,42 @@ def eval_epoch_gcn(model, loader, criterion, device):
             all_labels.extend(labels.cpu().numpy())
     return total_loss / max(total_utts, 1), np.array(all_preds), np.array(all_labels)
 
+# Carves out an internal validation set from the training graphs for a given fold/session. The internal validation set consists of all dialogues from the last session present in the training graphs, while the internal training set consists of all dialogues from the other sessions. This is used for hyperparameter tuning and early stopping during training.
+def split_internal_validation(train_graphs_fold):
+    import re
+
+    def session_of(g):
+        match = re.match(r'Ses0?(\d)', g["dialogue_name"])
+        return int(match.group(1)) if match else -1
+
+    sessions_present = sorted({session_of(g) for g in train_graphs_fold})
+    internal_val_session = sessions_present[-1]
+
+    internal_train = [g for g in train_graphs_fold if session_of(g) != internal_val_session]
+    internal_val = [g for g in train_graphs_fold if session_of(g) == internal_val_session]
+
+    return internal_train, internal_val, internal_val_session
 
 # Per-fold training and evaluation functions for DialogueGCN and MMGCN. Each function takes the training and test graphs for a given fold, the device to run on, and the number of epochs and patience for early stopping. The functions return the best weighted F1 score on the test set, the epoch at which it was achieved, and the final predictions and labels for the test set.
 
 # Trains and evaluates DialogueGCN for one LOSO fold. Note that the best model is selected based on the test set F1 score, which is not a valid practice in real-world scenarios, but is done here for consistency with prior work.
 def train_gcn_fold(train_graphs_fold, test_graphs_fold, fold_device, fold_session,
                     epochs=150, patience=20):
-    fold_train_ds = DialogueGraphDataset(train_graphs_fold, fold_device)
+    internal_train_graphs, internal_val_graphs, internal_val_session = split_internal_validation(train_graphs_fold)
+    print(f"  [DialogueGCN fold {fold_session}] internal val = session {internal_val_session} "
+          f"({len(internal_val_graphs)} dialogues)")
+
+    fold_train_ds = DialogueGraphDataset(internal_train_graphs, fold_device)
+    fold_val_ds = DialogueGraphDataset(internal_val_graphs, fold_device)
     fold_test_ds = DialogueGraphDataset(test_graphs_fold, fold_device)
     fold_train_ld = DataLoader(fold_train_ds, batch_size=1, shuffle=True, collate_fn=dialogue_collate_fn)
+    fold_val_ld = DataLoader(fold_val_ds, batch_size=1, shuffle=False, collate_fn=dialogue_collate_fn)
     fold_test_ld = DataLoader(fold_test_ds, batch_size=1, shuffle=False, collate_fn=dialogue_collate_fn)
 
     model = DialogueGCN(text_dim=768, seq_hidden=200, gcn_hidden=200, fc_dim=100,
                          num_relations=8, num_classes=4, dropout=0.4).to(fold_device)
 
-    crit_train = make_loss_fn(train_graphs_fold, fold_device)
-    crit_test = make_loss_fn(test_graphs_fold, fold_device)
+    crit_train = make_loss_fn(internal_train_graphs, fold_device)
     optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=7)
 
@@ -521,7 +541,7 @@ def train_gcn_fold(train_graphs_fold, test_graphs_fold, fold_device, fold_sessio
 
     for ep in range(1, epochs + 1):
         train_epoch_gcn(model, fold_train_ld, optimizer, crit_train, fold_device)
-        _, ep_preds, ep_labels = eval_epoch_gcn(model, fold_test_ld, crit_test, fold_device)
+        _, ep_preds, ep_labels = eval_epoch_gcn(model, fold_val_ld, crit_train, fold_device)
         ep_f1 = sklearn_f1(ep_labels, ep_preds, average='weighted')
         scheduler.step(ep_f1)
 
@@ -541,7 +561,7 @@ def train_gcn_fold(train_graphs_fold, test_graphs_fold, fold_device, fold_sessio
         model.load_state_dict(best_state)
 
     t1 = time.perf_counter()
-    _, final_preds, final_labels = eval_epoch_gcn(model, fold_test_ld, crit_test, fold_device)
+    _, final_preds, final_labels = eval_epoch_gcn(model, fold_test_ld, crit_train, fold_device)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     inf_time = time.perf_counter() - t1
@@ -551,7 +571,7 @@ def train_gcn_fold(train_graphs_fold, test_graphs_fold, fold_device, fold_sessio
     fold_f1 = sklearn_f1(final_labels, final_preds, average='weighted')
 
     model.cpu()
-    del model, fold_train_ld, fold_test_ld, optimizer, scheduler, crit_train, crit_test, best_state
+    del model, fold_train_ld, fold_val_ld, fold_test_ld, optimizer, scheduler, crit_train, best_state
     import gc; gc.collect()
     if torch.cuda.is_available():
         torch.cuda.synchronize(); torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
@@ -561,9 +581,15 @@ def train_gcn_fold(train_graphs_fold, test_graphs_fold, fold_device, fold_sessio
 # Trains and evaluates MMGCN for one LOSO fold. Note that the best model is selected based on the test set F1 score, which is not a valid practice in real-world scenarios, but is done here for consistency with prior work.
 def train_mmgcn_fold(train_graphs_fold, test_graphs_fold, fold_device, fold_session,
                       visual_dim, epochs=150, patience=25, min_epochs=20):
-    fold_train_ds = DialogueGraphDataset(train_graphs_fold, fold_device)
+    internal_train_graphs, internal_val_graphs, internal_val_session = split_internal_validation(train_graphs_fold)
+    print(f"  [MMGCN fold {fold_session}] internal val = session {internal_val_session} "
+          f"({len(internal_val_graphs)} dialogues)")
+
+    fold_train_ds = DialogueGraphDataset(internal_train_graphs, fold_device)
+    fold_val_ds = DialogueGraphDataset(internal_val_graphs, fold_device)
     fold_test_ds = DialogueGraphDataset(test_graphs_fold, fold_device)
     fold_train_ld = DataLoader(fold_train_ds, batch_size=1, shuffle=True, collate_fn=dialogue_collate_fn)
+    fold_val_ld = DataLoader(fold_val_ds, batch_size=1, shuffle=False, collate_fn=dialogue_collate_fn)
     fold_test_ld = DataLoader(fold_test_ds, batch_size=1, shuffle=False, collate_fn=dialogue_collate_fn)
 
     model = MMGCNModel(text_dim=768, audio_dim=768, visual_dim=visual_dim,
