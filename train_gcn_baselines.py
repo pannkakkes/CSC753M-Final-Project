@@ -709,13 +709,18 @@ def main():
     pd.DataFrame(rows).round(4).to_csv(RESULTS_DIR / "gcn_baselines_results.csv", index=False)
     timer.to_df().to_csv(RESULTS_DIR / "gcn_baselines_timing.csv", index=False)
 
+    from sklearn.metrics import classification_report
+    pred_rows = []
     for model_name, data in pooled_predictions.items():
-        from sklearn.metrics import classification_report
         print(f"\n{model_name} — pooled classification report (all 5 folds):")
         print(classification_report(data["y_true"], data["y_pred"], target_names=le.classes_))
+        for yt, yp in zip(data["y_true"], data["y_pred"]):
+            pred_rows.append({"model": model_name, "y_true": int(yt), "y_pred": int(yp)})
+    pd.DataFrame(pred_rows).to_csv(RESULTS_DIR / "gcn_baselines_pooled_predictions.csv", index=False)
 
     print(f"\nSaved: {RESULTS_DIR / 'gcn_baselines_results.csv'}")
     print(f"Saved: {RESULTS_DIR / 'gcn_baselines_timing.csv'}")
+    print(f"Saved: {RESULTS_DIR / 'gcn_baselines_pooled_predictions.csv'}")
 
 
 if __name__ == "__main__":
